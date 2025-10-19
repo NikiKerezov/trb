@@ -12,7 +12,7 @@ export type TakeProfitLevel = {
 export type ParsedSignal = {
   pair: string;
   direction: Direction;
-  entryZone: number;
+  entryZone: number | 'market';
   stopLoss: number;
   takeProfits: TakeProfitLevel[];
   confidence: number;

@@ -73,16 +73,86 @@ export class TelegramClient {
 
     this.client.addEventHandler(async (event: any) => {
       try {
-        // Check if this is a new message event
-        if (event.className === 'UpdateNewMessage') {
-          const message = event.message;
-          
+        // Log ALL events for debugging
+        getLogger().debug('Received Telegram event', {
+          eventType: event.className,
+          eventKeys: Object.keys(event)
+        });
+
+        // Handle multiple message event types:
+        // - UpdateNewMessage: groups and channels (older format)
+        // - UpdateNewChannelMessage: channel messages (new format)
+        // - UpdateShortMessage: private direct messages
+        let message: any = null;
+
+        if (event.className === 'UpdateNewMessage' || event.className === 'UpdateNewChannelMessage') {
+          message = event.message;
+        } else if (event.className === 'UpdateShortMessage') {
+          // For short messages (private chats), we need to construct a message-like object
+          message = {
+            message: event.message,
+            id: event.id,
+            chatId: event.userId,
+            date: event.date,
+            fromId: event.userId,
+            peerId: event.userId,
+            getChat: async () => {
+              // For private messages, get the user entity
+              try {
+                const user = await this.client!.getEntity(event.userId);
+                return user;
+              } catch (error) {
+                getLogger().warn('Could not get user entity for UpdateShortMessage', {
+                  userId: event.userId,
+                  error: error instanceof Error ? error.message : 'Unknown'
+                });
+                return null;
+              }
+            }
+          };
+        }
+
+        if (message) {
+
           // Check if message is from our target signal source
-          const chat = await message.getChat();
+          let chat = await message.getChat();
+
+          // For channel messages, getChat() might return null, so we need to get entity from peerId
+          if (!chat && message.peerId) {
+            try {
+              chat = await this.client!.getEntity(message.peerId);
+              getLogger().debug('Got chat entity from peerId', {
+                peerId: message.peerId?.toString()
+              });
+            } catch (error) {
+              getLogger().warn('Could not get entity from peerId', {
+                peerId: message.peerId?.toString(),
+                error: error instanceof Error ? error.message : 'Unknown'
+              });
+            }
+          }
+
           const chatUsername = chat?.username;
-          
+          const chatTitle = (chat as any)?.title;
+          const chatId = message.chatId;
+          const fromId = message.fromId;
+          const peerId = message.peerId;
+
+          // Debug logging - log ALL incoming messages with extensive details
+          getLogger().info('Received Telegram message', {
+            chatUsername,
+            chatTitle,
+            chatId: chatId?.toString(),
+            fromId: fromId?.toString(),
+            peerId: peerId?.toString(),
+            expectedSource: this.config.signalSource.replace('@', ''),
+            messagePreview: message.message?.substring(0, 100),
+            fullChatObject: chat ? JSON.stringify(chat).substring(0, 200) : 'null'
+          });
+
           // Only process messages from the specified signal source
           if (chatUsername && chatUsername === this.config.signalSource.replace('@', '')) {
+            getLogger().info('Message matches expected source, processing...');
             const rawMessage: RawTelegramMessage = {
               text: message.message || '',
               chatId: Number(message.chatId),
@@ -97,14 +167,19 @@ export class TelegramClient {
               try {
                 handler(rawMessage);
               } catch (error) {
-                logApiError('telegram', error as Error, { 
+                logApiError('telegram', error as Error, {
                   action: 'message_handler',
-                  messageId: rawMessage.messageId 
+                  messageId: rawMessage.messageId
                 });
               }
             });
+          } else {
+            getLogger().warn('Message does NOT match expected source', {
+              received: chatUsername,
+              expected: this.config.signalSource.replace('@', '')
+            });
           }
-        }
+        } // end if (message)
       } catch (error) {
         logApiError('telegram', error as Error, { action: 'message_event' });
       }

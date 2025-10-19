@@ -26,12 +26,13 @@ export class SignalParser {
       }
 
       // Extract signal components using regex patterns
-      const pairMatch = text.match(/📉 Pair:\s*([A-Z]+\/[A-Z]+)/);
-      const directionMatch = text.match(/🔴 Direction:\s*(LONG|SHORT)/);
-      const entryMatch = text.match(/🎯 Entry Zone:\s*([\d.]+)/);
-      const stopLossMatch = text.match(/🛡️ Stop Loss:\s*([\d.]+)/);
-      const takeProfitsMatch = text.match(/🎯 Take Profits:\s*(.+?)(?=\n\n|🧠)/s);
-      const confidenceMatch = text.match(/🧠 Confidence:\s*([\d.]+)%/);
+      // Allow any emoji or no emoji before field names
+      const pairMatch = text.match(/(?:📉|📊|💹)?\s*Pair:\s*([A-Z]+\/[A-Z]+)/i);
+      const directionMatch = text.match(/(?:🔴|🟢|🔵|⚪️|▶️)?\s*Direction:\s*(LONG|SHORT)/i);
+      const entryMatch = text.match(/(?:🎯|📍|➡️)?\s*Entry Zone:\s*([\d.,]+|market)/i);
+      const stopLossMatch = text.match(/(?:🛡️|❌|🚫|⛔️)?\s*Stop Loss:\s*([\d.,]+)/i);
+      const takeProfitsMatch = text.match(/(?:🎯|✅|💰)?\s*Take Profits?:\s*(.+?)(?=\n\n|🧠|$)/si);
+      const confidenceMatch = text.match(/(?:🧠|📊|💡)?\s*Confidence:\s*([\d.]+)%/i);
 
       // Validate all required components are present
       if (!pairMatch || !pairMatch[1]) {
@@ -60,11 +61,13 @@ export class SignalParser {
       }
 
       // Convert and validate numeric values
-      const entryZone = parseFloat(entryMatch![1]);
-      const stopLoss = parseFloat(stopLossMatch![1]);
-      const confidence = parseFloat(confidenceMatch![1]);
+      // Remove commas from numbers (e.g., "108,700" -> "108700")
+      const entryZoneStr = entryMatch![1].toLowerCase().replace(/,/g, '');
+      const entryZone: number | 'market' = entryZoneStr === 'market' ? 'market' : parseFloat(entryZoneStr);
+      const stopLoss = parseFloat(stopLossMatch![1].replace(/,/g, ''));
+      const confidence = parseFloat(confidenceMatch![1].replace(/,/g, ''));
 
-      if (isNaN(entryZone) || entryZone <= 0) {
+      if (entryZone !== 'market' && (isNaN(entryZone as number) || (entryZone as number) <= 0)) {
         return { success: false, error: 'Invalid entry zone value' };
       }
       if (isNaN(stopLoss) || stopLoss <= 0) {
@@ -74,35 +77,37 @@ export class SignalParser {
         return { success: false, error: 'Invalid confidence value' };
       }
 
-      // Validate direction-specific logic
+      // Validate direction-specific logic (skip if entry is market)
       const direction = directionMatch[1] as Direction;
-      if (direction === 'LONG' && stopLoss >= entryZone) {
-        return { 
-          success: false, 
-          error: 'For LONG positions, stop loss must be below entry zone' 
-        };
-      }
-      if (direction === 'SHORT' && stopLoss <= entryZone) {
-        return { 
-          success: false, 
-          error: 'For SHORT positions, stop loss must be above entry zone' 
-        };
-      }
-
-      // Validate take profit levels against direction
-      const invalidTPs = takeProfitsResult.takeProfits.filter(tp => {
-        if (direction === 'LONG') {
-          return tp.price <= entryZone;
-        } else {
-          return tp.price >= entryZone;
+      if (entryZone !== 'market') {
+        if (direction === 'LONG' && stopLoss >= (entryZone as number)) {
+          return {
+            success: false,
+            error: 'For LONG positions, stop loss must be below entry zone'
+          };
         }
-      });
+        if (direction === 'SHORT' && stopLoss <= (entryZone as number)) {
+          return {
+            success: false,
+            error: 'For SHORT positions, stop loss must be above entry zone'
+          };
+        }
 
-      if (invalidTPs.length > 0) {
-        return {
-          success: false,
-          error: `Invalid take profit levels for ${direction} position: ${invalidTPs.map(tp => `TP${tp.level}: ${tp.price}`).join(', ')}`
-        };
+        // Validate take profit levels against direction
+        const invalidTPs = takeProfitsResult.takeProfits.filter(tp => {
+          if (direction === 'LONG') {
+            return tp.price <= (entryZone as number);
+          } else {
+            return tp.price >= (entryZone as number);
+          }
+        });
+
+        if (invalidTPs.length > 0) {
+          return {
+            success: false,
+            error: `Invalid take profit levels for ${direction} position: ${invalidTPs.map(tp => `TP${tp.level}: ${tp.price}`).join(', ')}`
+          };
+        }
       }
 
       const signal: ParsedSignal = {
@@ -153,12 +158,12 @@ export class SignalParser {
     try {
       const takeProfits: TakeProfitLevel[] = [];
       
-      // Match patterns like "1 - 0.310, 2 - 0.307, 3 - 0.304"
-      const tpMatches = takeProfitsText.matchAll(/(\d+)\s*-\s*([\d.]+)/g);
-      
+      // Match patterns like "1 - 0.310, 2 - 0.307, 3 - 0.304" or "1 - 109,000"
+      const tpMatches = takeProfitsText.matchAll(/(\d+)\s*-\s*([\d.,]+)/g);
+
       for (const match of tpMatches) {
         const level = parseInt(match[1]!);
-        const price = parseFloat(match[2]!);
+        const price = parseFloat(match[2]!.replace(/,/g, ''));
         
         if (isNaN(level) || level <= 0) {
           return { success: false, error: `Invalid take profit level: ${match[1]!}` };
@@ -209,7 +214,7 @@ export class SignalParser {
     }
 
     // Validate numeric values
-    if (signal.entryZone <= 0) {
+    if (signal.entryZone !== 'market' && signal.entryZone <= 0) {
       errors.push('Entry zone must be positive');
     }
     if (signal.stopLoss <= 0) {
@@ -221,17 +226,17 @@ export class SignalParser {
 
     // Validate take profit ordering for the direction
     if (signal.direction === 'LONG') {
-      // For LONG: TP1 > TP2 > TP3 and all > entry
+      // For LONG: TP1 < TP2 < TP3 (prices increasing - selling at higher prices for profit)
       for (let i = 0; i < signal.takeProfits.length - 1; i++) {
-        if (signal.takeProfits[i]!.price <= signal.takeProfits[i + 1]!.price) {
-          errors.push(`For LONG positions, TP${signal.takeProfits[i]!.level} (${signal.takeProfits[i]!.price}) must be greater than TP${signal.takeProfits[i + 1]!.level} (${signal.takeProfits[i + 1]!.price})`);
+        if (signal.takeProfits[i]!.price >= signal.takeProfits[i + 1]!.price) {
+          errors.push(`For LONG positions, TP${signal.takeProfits[i]!.level} (${signal.takeProfits[i]!.price}) must be less than TP${signal.takeProfits[i + 1]!.level} (${signal.takeProfits[i + 1]!.price})`);
         }
       }
     } else {
-      // For SHORT: TP1 < TP2 < TP3 and all < entry
+      // For SHORT: TP1 > TP2 > TP3 (prices decreasing - buying back at lower prices for profit)
       for (let i = 0; i < signal.takeProfits.length - 1; i++) {
-        if (signal.takeProfits[i]!.price >= signal.takeProfits[i + 1]!.price) {
-          errors.push(`For SHORT positions, TP${signal.takeProfits[i]!.level} (${signal.takeProfits[i]!.price}) must be less than TP${signal.takeProfits[i + 1]!.level} (${signal.takeProfits[i + 1]!.price})`);
+        if (signal.takeProfits[i]!.price <= signal.takeProfits[i + 1]!.price) {
+          errors.push(`For SHORT positions, TP${signal.takeProfits[i]!.level} (${signal.takeProfits[i]!.price}) must be greater than TP${signal.takeProfits[i + 1]!.level} (${signal.takeProfits[i + 1]!.price})`);
         }
       }
     }

@@ -26,18 +26,19 @@ export class PositionManager {
    * Create and track a new position
    */
   createPosition(
-    signal: ParsedSignal, 
-    orderId: string, 
-    leverage: number, 
-    positionSize: number
+    signal: ParsedSignal,
+    orderId: string,
+    leverage: number,
+    positionSize: number,
+    actualEntryPrice: number
   ): Position {
     const position: Position = {
       id: `${signal.pair}_${Date.now()}`,
       symbol: signal.pair,
       side: signal.direction,
       size: positionSize,
-      entryPrice: signal.entryZone,
-      currentPrice: signal.entryZone,
+      entryPrice: actualEntryPrice,
+      currentPrice: actualEntryPrice,
       stopLoss: signal.stopLoss,
       takeProfits: signal.takeProfits.map(tp => ({
         level: tp.level,

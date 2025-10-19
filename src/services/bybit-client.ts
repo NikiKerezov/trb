@@ -25,9 +25,16 @@ export class BybitClient {
 
   constructor(config: BybitConfig) {
     this.config = config;
-    this.baseUrl = config.baseUrl || (config.testnet 
-      ? 'https://api-testnet.bybit.com' 
+    this.baseUrl = config.baseUrl || (config.testnet
+      ? 'https://api-testnet.bybit.com'
       : 'https://api.bybit.com');
+  }
+
+  /**
+   * Convert signal symbol format (BTC/USDT) to Bybit format (BTCUSDT)
+   */
+  private convertSymbolToBybit(symbol: string): string {
+    return symbol.replace('/', '');
   }
 
   /**
@@ -111,17 +118,24 @@ export class BybitClient {
    * Make raw authenticated request to Bybit API (without rate limiting)
    */
   private async makeRawRequest(
-    endpoint: string, 
-    method: 'GET' | 'POST' = 'GET', 
+    endpoint: string,
+    method: 'GET' | 'POST' = 'GET',
     params: Record<string, unknown> = {}
   ): Promise<unknown> {
     const logger = getLogger();
-    
+
     try {
       const timestamp = Date.now();
-      const paramsString = new URLSearchParams(
-        Object.entries(params).map(([key, value]) => [key, String(value)]) as Array<[string, string]>
-      ).toString();
+
+      // For POST requests, use JSON body for signature; for GET, use query params
+      let paramsString: string;
+      if (method === 'POST') {
+        paramsString = Object.keys(params).length > 0 ? JSON.stringify(params) : '';
+      } else {
+        paramsString = new URLSearchParams(
+          Object.entries(params).map(([key, value]) => [key, String(value)]) as Array<[string, string]>
+        ).toString();
+      }
 
       const signature = this.generateSignature(timestamp, paramsString);
 
@@ -169,8 +183,11 @@ export class BybitClient {
 
     try {
       const data = JSON.parse(responseText) as { retCode: number; retMsg: string; result: unknown };
-      
-      if (data.retCode !== 0) {
+
+      // Error codes that indicate "already set" - treat as success:
+      // 110043: "leverage not modified" - leverage already at requested value
+      // 34040: "not modified" - stop loss/take profit already at requested value
+      if (data.retCode !== 0 && data.retCode !== 110043 && data.retCode !== 34040) {
         throw new Error(`Bybit API error: ${data.retCode} - ${data.retMsg}`);
       }
 
@@ -251,43 +268,47 @@ export class BybitClient {
    * Uses conservative risk management principles
    */
   calculatePositionSize(
-    signal: ParsedSignal, 
-    portfolioValue: number, 
-    portfolioPercentage: number
+    signal: ParsedSignal,
+    portfolioValue: number,
+    portfolioPercentage: number,
+    currentPrice: number
   ): { size: number; leverage: number } {
     // Amount we're willing to risk (in USDT)
     const riskAmount = (portfolioValue * portfolioPercentage) / 100;
-    
+
+    // Use current price for market entries
+    const entryPrice = signal.entryZone === 'market' ? currentPrice : signal.entryZone;
+
     // Distance from entry to stop loss (in price units)
-    const stopLossDistance = Math.abs(signal.entryZone - signal.stopLoss);
-    
+    const stopLossDistance = Math.abs(entryPrice - signal.stopLoss);
+
     // Risk per unit: how much we lose per unit if stop loss hits
     const riskPerUnit = stopLossDistance;
-    
+
     // Position size: how many units we can buy with our risk amount
     // If we buy X units and stop loss hits, we lose X * riskPerUnit
     // We want X * riskPerUnit = riskAmount
     const positionSizeInUnits = riskAmount / riskPerUnit;
-    
+
     // Position value in USDT at entry price
-    const positionValueUSDT = positionSizeInUnits * signal.entryZone;
-    
+    const positionValueUSDT = positionSizeInUnits * entryPrice;
+
     // Leverage = Position Value / Margin Required
     // We want margin required to be reasonable (max 20x leverage for safety)
     const maxLeverage = 20;
     const requiredMargin = positionValueUSDT / maxLeverage;
-    
+
     // Ensure we don't exceed available balance for margin
     const availableForMargin = portfolioValue * 0.8; // Use max 80% of balance as margin
     const actualMargin = Math.min(requiredMargin, availableForMargin);
-    
+
     // Calculate final leverage and position size
     const leverage = Math.min(maxLeverage, Math.max(1, positionValueUSDT / actualMargin));
-    const finalPositionSize = (actualMargin * leverage) / signal.entryZone;
-    
-    return { 
-      size: Number(finalPositionSize.toFixed(6)), 
-      leverage: Math.floor(leverage) 
+    const finalPositionSize = (actualMargin * leverage) / entryPrice;
+
+    return {
+      size: Number(finalPositionSize.toFixed(6)),
+      leverage: Math.floor(leverage)
     };
   }
 
@@ -313,12 +334,21 @@ export class BybitClient {
    * Place a market order
    */
   async placeMarketOrder(order: TradeOrder): Promise<OrderResponse> {
+    // Round quantity - for low-priced altcoins, use whole numbers
+    const roundedQty = Math.floor(order.qty);
+
+    getLogger().info('Placing market order', {
+      originalQty: order.qty,
+      roundedQty,
+      symbol: order.symbol
+    });
+
     const params = {
       category: 'linear',
       symbol: order.symbol,
       side: order.side,
       orderType: 'Market',
-      qty: order.qty.toString(),
+      qty: roundedQty.toString(),
       timeInForce: 'IOC'
     };
 
@@ -351,25 +381,19 @@ export class BybitClient {
    * Set stop loss for a position
    */
   async setStopLoss(symbol: string, side: Direction, stopLossPrice: number): Promise<void> {
-    // Close existing stop loss orders first
-    await this.cancelStopLoss(symbol);
+    // Convert symbol format if needed (BTC/USDT -> BTCUSDT)
+    const bybitSymbol = this.convertSymbolToBybit(symbol);
 
-    // Create new stop loss order
-    const orderSide = side === 'LONG' ? 'Sell' : 'Buy';
-    
-    await this.makeRequest('/v5/order/create', 'POST', {
+    // Use trading-stop endpoint to set stop loss for the position
+    await this.makeRequest('/v5/position/trading-stop', 'POST', {
       category: 'linear',
-      symbol,
-      side: orderSide,
-      orderType: 'Market',
-      qty: '0', // Will close entire position
+      symbol: bybitSymbol,
       stopLoss: stopLossPrice.toString(),
-      timeInForce: 'GTC',
-      reduceOnly: true
+      positionIdx: 0 // 0 for one-way mode (default), 1 for Buy side in hedge mode, 2 for Sell side
     });
 
     logTradeExecution('UPDATE_SL', {
-      symbol,
+      symbol: bybitSymbol,
       side,
       stopLossPrice,
       action: 'set_stop_loss'
@@ -421,42 +445,57 @@ export class BybitClient {
    * Place take profit orders
    */
   async setTakeProfits(
-    symbol: string, 
-    side: Direction, 
+    symbol: string,
+    side: Direction,
     takeProfits: Array<{ level: number; price: number }>,
     positionSize: number
   ): Promise<void> {
+    // Use only the highest TP (last in array) for the entire position
+    const highestTP = takeProfits[takeProfits.length - 1];
+
+    if (!highestTP) {
+      getLogger().warn('No take profit levels found');
+      return;
+    }
+
     const orderSide = side === 'LONG' ? 'Sell' : 'Buy';
-    const sizePerTP = positionSize / takeProfits.length;
+    // Round quantity to whole number for altcoins
+    const roundedQty = Math.floor(positionSize);
 
-    for (const tp of takeProfits) {
-      try {
-        await this.makeRequest('/v5/order/create', 'POST', {
-          category: 'linear',
-          symbol,
-          side: orderSide,
-          orderType: 'Limit',
-          qty: sizePerTP.toString(),
-          price: tp.price.toString(),
-          timeInForce: 'GTC',
-          reduceOnly: true
-        });
+    try {
+      await this.makeRequest('/v5/order/create', 'POST', {
+        category: 'linear',
+        symbol,
+        side: orderSide,
+        orderType: 'Limit',
+        qty: roundedQty.toString(),
+        price: highestTP.price.toString(),
+        timeInForce: 'GTC',
+        reduceOnly: true
+      });
 
-        logTradeExecution('TAKE_PROFIT', {
-          symbol,
-          side,
-          level: tp.level,
-          price: tp.price,
-          qty: sizePerTP
-        });
-      } catch (error) {
-        logApiError('bybit', error as Error, {
-          action: 'set_take_profit',
-          symbol,
-          level: tp.level,
-          price: tp.price
-        });
-      }
+      logTradeExecution('TAKE_PROFIT', {
+        symbol,
+        side,
+        level: highestTP.level,
+        price: highestTP.price,
+        qty: roundedQty
+      });
+
+      getLogger().info('Take profit order placed for entire position', {
+        symbol,
+        tpLevel: highestTP.level,
+        tpPrice: highestTP.price,
+        qty: roundedQty
+      });
+    } catch (error) {
+      logApiError('bybit', error as Error, {
+        action: 'set_take_profit',
+        symbol,
+        level: highestTP.level,
+        price: highestTP.price
+      });
+      throw error; // Throw to allow retry if needed
     }
   }
 
@@ -464,22 +503,38 @@ export class BybitClient {
    * Execute a complete trade based on signal with atomic rollback on failure
    */
   async executeTrade(
-    signal: ParsedSignal, 
-    portfolioValue: number, 
+    signal: ParsedSignal,
+    portfolioValue: number,
     portfolioPercentage: number
-  ): Promise<{ orderId: string; leverage: number; positionSize: number }> {
+  ): Promise<{ orderId: string; leverage: number; positionSize: number; actualEntryPrice: number }> {
     const logger = getLogger();
     let orderResponse: OrderResponse | null = null;
-    
+
+    // Convert symbol from BTC/USDT to BTCUSDT format for Bybit API
+    const bybitSymbol = this.convertSymbolToBybit(signal.pair);
+
     try {
+      // Fetch market price if entry is market
+      let currentPrice: number;
+      if (signal.entryZone === 'market') {
+        currentPrice = await this.getMarketPrice(bybitSymbol);
+        logger.info('Market entry requested, fetched current price', {
+          symbol: signal.pair,
+          currentPrice
+        });
+      } else {
+        currentPrice = signal.entryZone;
+      }
+
       // Calculate position size and leverage
-      const { size, leverage } = this.calculatePositionSize(signal, portfolioValue, portfolioPercentage);
-      
+      const { size, leverage } = this.calculatePositionSize(signal, portfolioValue, portfolioPercentage, currentPrice);
+
       logger.info('Executing trade', {
         signal: {
           pair: signal.pair,
           direction: signal.direction,
           entryZone: signal.entryZone,
+          actualEntryPrice: currentPrice,
           stopLoss: signal.stopLoss
         },
         calculatedSize: size,
@@ -489,11 +544,11 @@ export class BybitClient {
       });
 
       // Set leverage
-      await this.setLeverage(signal.pair, leverage);
+      await this.setLeverage(bybitSymbol, leverage);
 
       // Place market order
       const order: TradeOrder = {
-        symbol: signal.pair,
+        symbol: bybitSymbol,
         side: signal.direction === 'LONG' ? 'Buy' : 'Sell',
         orderType: 'Market',
         qty: size
@@ -503,8 +558,8 @@ export class BybitClient {
 
       // Wait for order to fill and verify position exists
       await new Promise(resolve => setTimeout(resolve, 3000));
-      
-      const position = await this.getPosition(signal.pair);
+
+      const position = await this.getPosition(bybitSymbol);
       if (!position || position.size === 0) {
         throw new Error('Order placed but position not found - possible fill failure');
       }
@@ -513,12 +568,17 @@ export class BybitClient {
       let stopLossSet = false;
       for (let attempt = 1; attempt <= 3 && !stopLossSet; attempt++) {
         try {
-          await this.setStopLoss(signal.pair, signal.direction, signal.stopLoss);
+          await this.setStopLoss(bybitSymbol, signal.direction, signal.stopLoss);
           stopLossSet = true;
         } catch (error) {
-          logger.warn(`Stop loss attempt ${attempt} failed`, { error });
+          const errorMsg = error instanceof Error ? error.message : JSON.stringify(error);
+          logger.warn(`Stop loss attempt ${attempt} failed`, {
+            error: errorMsg,
+            stopLossPrice: signal.stopLoss,
+            symbol: bybitSymbol
+          });
           if (attempt === 3) {
-            throw new Error('Failed to set stop loss after 3 attempts');
+            throw new Error(`Failed to set stop loss after 3 attempts. Last error: ${errorMsg}`);
           }
           await new Promise(resolve => setTimeout(resolve, 1000 * attempt));
         }
@@ -526,7 +586,7 @@ export class BybitClient {
 
       // Set take profit orders (non-critical, log failures but don't rollback)
       try {
-        await this.setTakeProfits(signal.pair, signal.direction, signal.takeProfits, size);
+        await this.setTakeProfits(bybitSymbol, signal.direction, signal.takeProfits, size);
       } catch (error) {
         logger.error('Failed to set take profit orders', { 
           error: error instanceof Error ? error.message : 'Unknown error',
@@ -548,7 +608,8 @@ export class BybitClient {
       return {
         orderId: orderResponse.orderId,
         leverage,
-        positionSize: position.size
+        positionSize: position.size,
+        actualEntryPrice: currentPrice
       };
 
     } catch (error) {
@@ -560,10 +621,10 @@ export class BybitClient {
       // Rollback: Close position if order was placed
       if (orderResponse) {
         try {
-          await this.emergencyClosePosition(signal.pair, signal.direction);
-          logger.info('Emergency position closure completed', { 
+          await this.emergencyClosePosition(bybitSymbol, signal.direction);
+          logger.info('Emergency position closure completed', {
             symbol: signal.pair,
-            orderId: orderResponse.orderId 
+            orderId: orderResponse.orderId
           });
         } catch (rollbackError) {
           logger.error('CRITICAL: Failed to close position during rollback', {
@@ -601,6 +662,37 @@ export class BybitClient {
       orderType: 'Market',
       qty: position.size
     });
+  }
+
+  /**
+   * Get current market price for a symbol
+   */
+  async getMarketPrice(symbol: string): Promise<number> {
+    const result = await this.makeRequest('/v5/market/tickers', 'GET', {
+      category: 'linear',
+      symbol
+    }) as {
+      list: Array<{
+        symbol: string;
+        lastPrice: string;
+      }>;
+    };
+
+    if (!result.list || result.list.length === 0) {
+      throw new Error(`Market price not found for symbol: ${symbol}`);
+    }
+
+    const ticker = result.list[0];
+    if (!ticker) {
+      throw new Error(`Market price not found for symbol: ${symbol}`);
+    }
+
+    const price = parseFloat(ticker.lastPrice);
+    if (isNaN(price) || price <= 0) {
+      throw new Error(`Invalid market price for symbol: ${symbol}`);
+    }
+
+    return price;
   }
 
   /**
