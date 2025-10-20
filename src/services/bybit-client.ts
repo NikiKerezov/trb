@@ -222,7 +222,7 @@ export class BybitClient {
     return {
       coin,
       walletBalance: parseFloat(coinData.walletBalance),
-      availableBalance: parseFloat(coinData.availableBalance)
+      availableBalance: null  // Not using availableBalance, just set to null
     };
   }
 
@@ -584,16 +584,9 @@ export class BybitClient {
         }
       }
 
-      // Set take profit orders (non-critical, log failures but don't rollback)
-      try {
-        await this.setTakeProfits(bybitSymbol, signal.direction, signal.takeProfits, size);
-      } catch (error) {
-        logger.error('Failed to set take profit orders', { 
-          error: error instanceof Error ? error.message : 'Unknown error',
-          symbol: signal.pair 
-        });
-        // Continue without take profits - stop loss is more critical
-      }
+      // Set take profit orders
+      // Don't swallow errors - we need to see why TP placement fails
+      await this.setTakeProfits(bybitSymbol, signal.direction, signal.takeProfits, size);
 
       logger.info('Trade executed successfully', {
         orderId: orderResponse.orderId,

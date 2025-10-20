@@ -12,7 +12,13 @@
       "Bash(grep:*)",
       "Bash(pkill:*)",
       "Bash(true)",
-      "Bash(ssh:*)"
+      "Bash(ssh:*)",
+      "Bash(Get-Content \"C:\\Users\\nikol\\trading-bot\\trb\\logs\\app.log\")",
+      "Bash(Select-Object -Last 50)",
+      "Bash(npx ts-node test-trade.ts)",
+      "Bash(git add src/services/bybit-client.ts src/services/position-manager.ts src/services/signal-parser.ts src/services/telegram-client.ts src/services/trading-bot.ts src/types/signal.ts test-trade.ts)",
+      "Bash(git commit -m \"$(cat <<''EOF''\nFix trading bot for production deployment with Bybit V5 API\n\nMajor improvements to signal parsing, Telegram integration, and Bybit API compatibility:\n\n- Add market entry zone support for immediate trade execution\n- Fix signal parser to accept any emoji variations in signals\n- Fix Telegram client to handle channel messages and bot-sent messages\n- Fix Bybit V5 API signature generation for POST requests\n- Add quantity rounding for altcoin trading (whole numbers)\n- Fix stop loss placement using /v5/position/trading-stop endpoint\n- Update take profit strategy to use only TP3 for full position\n- Fix symbol format conversion (BTC/USDT -> BTCUSDT)\n- Handle Bybit \"not modified\" error codes (110043, 34040)\n- Fix portfolio balance fallback logic\n- Add comprehensive test script for manual trade testing\n- Fix position manager symbol format for trailing stop loss\n\nThe bot now successfully executes trades with trailing stop loss strategy:\nTP1 hit -> SL moves to entry, TP2 hit -> SL moves to TP1, exits at TP3\n\n🤖 Generated with [Claude Code](https://claude.com/claude-code)\n\nCo-Authored-By: Claude <noreply@anthropic.com>\nEOF\n)\")",
+      "Bash(git push)"
     ],
     "deny": []
   }

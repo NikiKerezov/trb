@@ -62,7 +62,7 @@ export type PositionInfo = {
 export type AccountBalance = {
   coin: string;
   walletBalance: number;
-  availableBalance: number;
+  availableBalance: number | null;
 };
 
 export type TradeExecutionRequest = {

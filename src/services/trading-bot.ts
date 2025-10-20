@@ -206,12 +206,12 @@ export class TradingBot {
     try {
       // Get current account balance
       const balance = await this.bybitClient.getAccountBalance();
-      // Use availableBalance if present, otherwise fall back to walletBalance
-      const portfolioValue = balance.availableBalance ?? balance.walletBalance;
+
+      // Use walletBalance directly
+      const portfolioValue = balance.walletBalance;
 
       if (!portfolioValue || portfolioValue <= 0) {
         logger.error('Insufficient balance to execute trade', {
-          availableBalance: balance.availableBalance,
           walletBalance: balance.walletBalance,
           signal: { pair: signal.pair, direction: signal.direction }
         });

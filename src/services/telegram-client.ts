@@ -71,12 +71,17 @@ export class TelegramClient {
       throw new Error('Telegram client not initialized');
     }
 
+    const { NewMessage } = require('telegram/events');
+
+    // Use NewMessage event filter to only receive message events
     this.client.addEventHandler(async (event: any) => {
       try {
-        // Log ALL events for debugging
+        // Log ALL events for debugging with more detail
+        const eventClassName = event?.className || event?.constructor?.name || 'Unknown';
         getLogger().debug('Received Telegram event', {
-          eventType: event.className,
-          eventKeys: Object.keys(event)
+          eventType: eventClassName,
+          eventKeys: Object.keys(event),
+          hasMessage: !!event.message
         });
 
         // Handle multiple message event types:
@@ -85,9 +90,13 @@ export class TelegramClient {
         // - UpdateShortMessage: private direct messages
         let message: any = null;
 
-        if (event.className === 'UpdateNewMessage' || event.className === 'UpdateNewChannelMessage') {
+        if (eventClassName === 'UpdateNewMessage' || eventClassName === 'UpdateNewChannelMessage') {
           message = event.message;
-        } else if (event.className === 'UpdateShortMessage') {
+          getLogger().info('Detected channel/group message event', {
+            eventType: eventClassName,
+            hasMessage: !!message
+          });
+        } else if (eventClassName === 'UpdateShortMessage') {
           // For short messages (private chats), we need to construct a message-like object
           message = {
             message: event.message,
@@ -110,6 +119,13 @@ export class TelegramClient {
               }
             }
           };
+          getLogger().info('Detected private message event');
+        } else if (event.message) {
+          // Fallback: if event has a message property but className doesn't match, try to use it anyway
+          message = event.message;
+          getLogger().info('Detected message event with unknown type, attempting to process', {
+            eventType: eventClassName
+          });
         }
 
         if (message) {
@@ -137,6 +153,7 @@ export class TelegramClient {
           const chatId = message.chatId;
           const fromId = message.fromId;
           const peerId = message.peerId;
+          const messageText = message.message || '';
 
           // Debug logging - log ALL incoming messages with extensive details
           getLogger().info('Received Telegram message', {
@@ -146,7 +163,7 @@ export class TelegramClient {
             fromId: fromId?.toString(),
             peerId: peerId?.toString(),
             expectedSource: this.config.signalSource.replace('@', ''),
-            messagePreview: message.message?.substring(0, 100),
+            messagePreview: messageText.substring(0, 100),
             fullChatObject: chat ? JSON.stringify(chat).substring(0, 200) : 'null'
           });
 
@@ -154,7 +171,7 @@ export class TelegramClient {
           if (chatUsername && chatUsername === this.config.signalSource.replace('@', '')) {
             getLogger().info('Message matches expected source, processing...');
             const rawMessage: RawTelegramMessage = {
-              text: message.message || '',
+              text: messageText,
               chatId: Number(message.chatId),
               messageId: message.id,
               date: new Date(message.date * 1000),
@@ -183,7 +200,7 @@ export class TelegramClient {
       } catch (error) {
         logApiError('telegram', error as Error, { action: 'message_event' });
       }
-    });
+    }, new NewMessage({}));
   }
 
   /**
