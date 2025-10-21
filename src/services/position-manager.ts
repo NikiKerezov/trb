@@ -97,6 +97,14 @@ export class PositionManager {
       position.pnl = bybitPosition.unrealisedPnl;
       position.updatedAt = new Date();
 
+      // Log successful update to verify fix
+      getLogger().info('Position updated successfully', {
+        positionId,
+        symbol: position.symbol,
+        currentPrice: position.currentPrice,
+        pnl: position.pnl
+      });
+
       // Check for take profit hits and adjust stop loss
       await this.checkTakeProfitHits(position, oldPrice, position.currentPrice);
 

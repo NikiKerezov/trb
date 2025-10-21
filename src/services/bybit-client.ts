@@ -230,9 +230,18 @@ export class BybitClient {
    * Get current position information
    */
   async getPosition(symbol: string): Promise<PositionInfo | null> {
+    // Convert symbol format if needed (BTC/USDT -> BTCUSDT)
+    const bybitSymbol = this.convertSymbolToBybit(symbol);
+
+    // Log to verify the fix is working
+    getLogger().info('getPosition called', {
+      inputSymbol: symbol,
+      convertedSymbol: bybitSymbol
+    });
+
     const result = await this.makeRequest('/v5/position/list', 'GET', {
       category: 'linear',
-      symbol
+      symbol: bybitSymbol
     }) as {
       list: Array<{
         symbol: string;
@@ -246,7 +255,7 @@ export class BybitClient {
       }>;
     };
 
-    const position = result.list.find(p => p.symbol === symbol && parseFloat(p.size) > 0);
+    const position = result.list.find(p => p.symbol === bybitSymbol && parseFloat(p.size) > 0);
     if (!position) {
       return null;
     }
@@ -316,16 +325,19 @@ export class BybitClient {
    * Set leverage for a symbol
    */
   async setLeverage(symbol: string, leverage: number): Promise<void> {
+    // Convert symbol format if needed (BTC/USDT -> BTCUSDT)
+    const bybitSymbol = this.convertSymbolToBybit(symbol);
+
     await this.makeRequest('/v5/position/set-leverage', 'POST', {
       category: 'linear',
-      symbol,
+      symbol: bybitSymbol,
       buyLeverage: leverage.toString(),
       sellLeverage: leverage.toString()
     });
 
     logTradeExecution('UPDATE_SL', {
       action: 'set_leverage',
-      symbol,
+      symbol: bybitSymbol,
       leverage
     });
   }
@@ -334,18 +346,21 @@ export class BybitClient {
    * Place a market order
    */
   async placeMarketOrder(order: TradeOrder): Promise<OrderResponse> {
+    // Convert symbol format if needed (BTC/USDT -> BTCUSDT)
+    const bybitSymbol = this.convertSymbolToBybit(order.symbol);
+
     // Round quantity - for low-priced altcoins, use whole numbers
     const roundedQty = Math.floor(order.qty);
 
     getLogger().info('Placing market order', {
       originalQty: order.qty,
       roundedQty,
-      symbol: order.symbol
+      symbol: bybitSymbol
     });
 
     const params = {
       category: 'linear',
-      symbol: order.symbol,
+      symbol: bybitSymbol,
       side: order.side,
       orderType: 'Market',
       qty: roundedQty.toString(),
@@ -359,7 +374,7 @@ export class BybitClient {
 
     const response: OrderResponse = {
       orderId: result.orderId,
-      symbol: order.symbol,
+      symbol: bybitSymbol,
       side: order.side,
       orderType: 'Market',
       qty: order.qty,
@@ -369,7 +384,7 @@ export class BybitClient {
 
     logTradeExecution('OPEN', {
       orderId: response.orderId,
-      symbol: order.symbol,
+      symbol: bybitSymbol,
       side: order.side,
       qty: order.qty
     });
@@ -404,11 +419,14 @@ export class BybitClient {
    * Cancel existing stop loss orders
    */
   async cancelStopLoss(symbol: string): Promise<void> {
+    // Convert symbol format if needed (BTC/USDT -> BTCUSDT)
+    const bybitSymbol = this.convertSymbolToBybit(symbol);
+
     try {
       // Get all open orders for the symbol
       const result = await this.makeRequest('/v5/order/realtime', 'GET', {
         category: 'linear',
-        symbol
+        symbol: bybitSymbol
       }) as {
         list: Array<{
           orderId: string;
@@ -419,25 +437,25 @@ export class BybitClient {
 
       // Cancel stop loss orders
       const stopLossOrders = result.list.filter(order => order.stopLoss);
-      
+
       for (const order of stopLossOrders) {
         await this.makeRequest('/v5/order/cancel', 'POST', {
           category: 'linear',
-          symbol,
+          symbol: bybitSymbol,
           orderId: order.orderId
         });
       }
 
       if (stopLossOrders.length > 0) {
         logTradeExecution('UPDATE_SL', {
-          symbol,
+          symbol: bybitSymbol,
           action: 'cancel_stop_loss',
           cancelledOrders: stopLossOrders.length
         });
       }
     } catch (error) {
       // Log but don't throw - it's ok if there are no stop loss orders to cancel
-      getLogger().warn('Error cancelling stop loss orders', { symbol, error });
+      getLogger().warn('Error cancelling stop loss orders', { symbol: bybitSymbol, error });
     }
   }
 
@@ -661,9 +679,12 @@ export class BybitClient {
    * Get current market price for a symbol
    */
   async getMarketPrice(symbol: string): Promise<number> {
+    // Convert symbol format if needed (BTC/USDT -> BTCUSDT)
+    const bybitSymbol = this.convertSymbolToBybit(symbol);
+
     const result = await this.makeRequest('/v5/market/tickers', 'GET', {
       category: 'linear',
-      symbol
+      symbol: bybitSymbol
     }) as {
       list: Array<{
         symbol: string;
@@ -672,12 +693,12 @@ export class BybitClient {
     };
 
     if (!result.list || result.list.length === 0) {
-      throw new Error(`Market price not found for symbol: ${symbol}`);
+      throw new Error(`Market price not found for symbol: ${bybitSymbol}`);
     }
 
     const ticker = result.list[0];
     if (!ticker) {
-      throw new Error(`Market price not found for symbol: ${symbol}`);
+      throw new Error(`Market price not found for symbol: ${bybitSymbol}`);
     }
 
     const price = parseFloat(ticker.lastPrice);
