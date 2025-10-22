@@ -322,23 +322,79 @@ export class BybitClient {
   }
 
   /**
+   * Get maximum allowed leverage for a symbol from Bybit
+   */
+  async getMaxLeverage(symbol: string): Promise<number> {
+    const bybitSymbol = this.convertSymbolToBybit(symbol);
+
+    try {
+      const result = await this.makeRequest('/v5/market/instruments-info', 'GET', {
+        category: 'linear',
+        symbol: bybitSymbol
+      }) as {
+        list: Array<{
+          symbol: string;
+          leverageFilter: {
+            minLeverage: string;
+            maxLeverage: string;
+            leverageStep: string;
+          };
+        }>;
+      };
+
+      if (!result.list || result.list.length === 0 || !result.list[0]) {
+        getLogger().warn('Could not get leverage info for symbol, using default max 20x', { symbol: bybitSymbol });
+        return 20;
+      }
+
+      const instrumentInfo = result.list[0];
+      const maxLeverage = parseFloat(instrumentInfo.leverageFilter.maxLeverage);
+      getLogger().info('Retrieved max leverage for symbol', {
+        symbol: bybitSymbol,
+        maxLeverage
+      });
+
+      return maxLeverage;
+    } catch (error) {
+      getLogger().warn('Error getting max leverage, using default 20x', {
+        symbol: bybitSymbol,
+        error: error instanceof Error ? error.message : 'Unknown error'
+      });
+      return 20; // Safe default
+    }
+  }
+
+  /**
    * Set leverage for a symbol
    */
   async setLeverage(symbol: string, leverage: number): Promise<void> {
     // Convert symbol format if needed (BTC/USDT -> BTCUSDT)
     const bybitSymbol = this.convertSymbolToBybit(symbol);
 
+    // Get max allowed leverage for this symbol and cap if necessary
+    const maxAllowedLeverage = await this.getMaxLeverage(bybitSymbol);
+    const cappedLeverage = Math.min(leverage, maxAllowedLeverage);
+
+    if (cappedLeverage < leverage) {
+      getLogger().warn('Requested leverage exceeds maximum, capping to max allowed', {
+        symbol: bybitSymbol,
+        requestedLeverage: leverage,
+        maxAllowedLeverage,
+        cappedLeverage
+      });
+    }
+
     await this.makeRequest('/v5/position/set-leverage', 'POST', {
       category: 'linear',
       symbol: bybitSymbol,
-      buyLeverage: leverage.toString(),
-      sellLeverage: leverage.toString()
+      buyLeverage: cappedLeverage.toString(),
+      sellLeverage: cappedLeverage.toString()
     });
 
     logTradeExecution('UPDATE_SL', {
       action: 'set_leverage',
       symbol: bybitSymbol,
-      leverage
+      leverage: cappedLeverage
     });
   }
 
